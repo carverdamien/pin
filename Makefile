@@ -21,13 +21,20 @@ OBJ := obj/
 LIB := lib/
 BIN := bin/
 
+VERSION := 1.0.0
+AUTHOR  := Gauthier Voron
+EMAIL   := gauthier.voron@lip6.fr
+
 CC      := gcc
-CCFLAGS := -Wall -Wextra -O2 -g
+CCFLAGS := -Wall -Wextra -O2 -g -DVERSION='"$(VERSION)"' \
+           -DAUTHOR='"$(AUTHOR)"' -DEMAIL='"$(EMAIL)"'
 SOFLAGS := -fPIC -shared
 LDFLAGS := -ldl -lpthread
 
-obj-y       := argument error runtime  
-lib-pthread := -lpthread -lrt
+pin-obj     := argument error runtime
+pin-lib     := -ldl -lpthread
+scanpin-lib := -lrt
+pthread-lib := -lpthread -lrt
 
 
 V ?= 1
@@ -43,19 +50,23 @@ endif
 
 default: all
 
-all: $(LIB)pin.so
+all: $(LIB)pin.so $(BIN)scanpin
 check: $(LIB)pin.so $(BIN)pthread
 	$(call print,  CHECK   $(TST)check.sh)
 	$(Q)./$(TST)check.sh $(LIB)pin.so $(BIN)
 
 
-$(LIB)pin.so: $(patsubst %, $(OBJ)%.so, $(obj-y)) | $(LIB)
+$(LIB)pin.so: $(patsubst %, $(OBJ)%.so, $(pin-obj)) | $(LIB)
 	$(call print,  LD      $@)
-	$(Q)$(CC) $(SOFLAGS) $^ -o $@ $(LDFLAGS)
+	$(Q)$(CC) $(SOFLAGS) $^ -o $@ $(pin-lib)
+
+$(BIN)scanpin: $(SRC)scanpin.c | $(BIN)
+	$(call print,  CCLD    $@)
+	$(Q)$(CC) $(CCFLAGS) -DPROGNAME='"scanpin"' $< -o $@ $(scanpin-lib)
 
 $(BIN)%: $(TST)%.c | $(BIN)
 	$(call print,  CCLD    $@)
-	$(Q)$(CC) $(CCFLAGS) $< -o $@ $(lib-$(patsubst $(BIN)%,%,$@))
+	$(Q)$(CC) $(CCFLAGS) $< -o $@ $($(patsubst $(BIN)%,%,$@)-lib)
 
 
 $(OBJ)%.so: $(SRC)%.c | $(OBJ)
