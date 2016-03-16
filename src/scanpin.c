@@ -39,6 +39,8 @@ const char *progname;
 size_t  children = 0;
 size_t  default_children = 10;
 
+char    print_name = 0;
+
 pid_t  *pids_to_scan = NULL;
 size_t  pids_capacity = 0;
 size_t  pids_length = 0;
@@ -71,7 +73,9 @@ static void usage(void)
 	       "  -c, --children[=<n>]   Collect information for children "
 	       "too. Only scan for\n"
 	       "                         children once every <n> period "
-	       "[default = %lu]\n",
+	       "[default = %lu]\n"
+	       "  -n, --name             Print the name of the tracked processes with lines:\n"
+	       "                         <time>:<pid>=<name>\n",
 	       scan_every_ms, default_children);
 }
 
@@ -123,14 +127,8 @@ static void signal_exit(int signum __attribute__((unused)))
 }
 
 
-static void track_pid(pid_t pid)
+static int track_pid(pid_t pid)
 {
-	size_t i;
-
-	for (i=0; i < pids_length; i++)
-		if (pids_to_scan[i] == pid)
-			return;
-
 	if (pids_length == pids_capacity) {
 		pids_capacity += PIDS_CHUNK;
 		pids_to_scan = realloc(pids_to_scan, sizeof (pid_t)
@@ -141,17 +139,12 @@ static void track_pid(pid_t pid)
 	}
 
 	pids_to_scan[pids_length++] = pid;
+	return 0;
 }
 
-static void untrack_pid(pid_t pid)
+static void untrack_pid(size_t index)
 {
-	size_t i;
-
-	for (i=0; i < pids_length; i++)
-		if (pids_to_scan[i] == pid) {
-			pids_to_scan[i] = pids_to_scan[--pids_length];
-			return;
-		}
+	pids_to_scan[index] = pids_to_scan[--pids_length];
 }
 
 
@@ -161,6 +154,14 @@ static int print_core_stat_handler(pid_t pid, tid_t tid,
 				   void *data)
 {
 	printf("%lu:%d:%d:%u\n", *((size_t *) data), pid, tid, stat->core);
+	return 0;
+}
+
+static int print_name_stat_handler(pid_t pid,
+				   const struct task_stat *stat,
+				   void *data)
+{
+	printf("%lu:%d=%s\n", *((size_t *) data), pid, stat->name);
 	return 0;
 }
 
@@ -176,18 +177,22 @@ static int print_tid_handler(pid_t pid, tid_t tid, void *data)
 
 static int track_stat_handler(pid_t pid,
 			      const struct task_stat *stat,
-			      void *data __attribute__((unused)))
+			      void *data)
 {
 	size_t i;
+	char child = 0;
 
 	for (i=0; i < pids_length; i++) {
 		if (pid == pids_to_scan[i])
 			return 0;
-		if (stat->ppid == pids_to_scan[i]) {
-			track_pid(pid);
-			break;
-		}
+		if (stat->ppid == pids_to_scan[i])
+			child = 1;
 	}
+
+	if (child && print_name)
+		printf("%lu:%d=%s\n", *((size_t *) data), pid, stat->name);
+	if (child)
+		track_pid(pid);
 
 	return 0;
 }
@@ -197,7 +202,6 @@ static int track_pid_handler(pid_t pid, void *data)
 	for_pid_stat(pid, track_stat_handler, data);
 	return 0;
 }
-
 
 
 static size_t now_millis(void)
@@ -231,13 +235,14 @@ static void parse_options(int *_argc, char ***_argv)
 		{"version",   no_argument,       0, 'V'},
 		{"period",    required_argument, 0, 'p'},
 		{"children",  optional_argument, 0, 'c'},
+		{"name",      no_argument,       0, 'n'},
 		{ NULL,       0,                 0,  0}
 	};
 
 	opterr = 0;
 
 	while (1) {
-		c = getopt_long(argc, argv, "hVp:c", options, &idx);
+		c = getopt_long(argc, argv, "hVp:cn", options, &idx);
 		if (c == -1)
 			break;
 
@@ -266,6 +271,9 @@ static void parse_options(int *_argc, char ***_argv)
 					error("invalid children: '%s'",optarg);
 			}
 			break;
+		case 'n':
+			print_name = 1;
+			break;
 		default:
 			error("unknown option '%s'", argv[optind-1]);
 		}
@@ -279,6 +287,7 @@ static void parse_arguments(int argc, char **argv)
 {
 	char *err;
 	pid_t pid;
+	size_t time = 0;
 	
 	if (argc < 1)
 		error("missing pid argument");
@@ -289,6 +298,7 @@ static void parse_arguments(int argc, char **argv)
 	if (*err != '\0')
 		error("invalid pid operand: '%s'", argv[0]);
 
+	for_pid_stat(pid, print_name_stat_handler, &time);
 	track_pid(pid);
 }
 
@@ -306,23 +316,21 @@ int main(int argc, char **argv)
 	signal(SIGINT, signal_exit);
 
 	start = now_millis();
-	current = start;
 	next = start;
 
 	step = 0;
 	while (1) {
-		while (next <= current)
-			next += scan_every_ms;
-		sleep_millis(next - current);
-
 		current = now_millis();
 		current_time = current - start;
+
+		if (step == 0)
+			foreach_pid(track_pid_handler, &current_time);
 
 		for (i=0; i < pids_length; i++) {
 			ret = foreach_tid(pids_to_scan[i], print_tid_handler,
 					  &current_time);
 			if (ret != 0)
-				untrack_pid(pids_to_scan[i]);
+				untrack_pid(i);
 
 			if (pids_length == 0)
 				clean_exit();
@@ -330,8 +338,10 @@ int main(int argc, char **argv)
 
 		if (++step >= children)
 			step = 0;
-		if (step == 0)
-			foreach_pid(track_pid_handler, NULL);
+
+		while (next <= current)
+			next += scan_every_ms;
+		sleep_millis(next - current);
 	}
 
 	/* dead code */
