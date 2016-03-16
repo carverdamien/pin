@@ -25,28 +25,20 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "procfs.h"
+
+
+#define PROGNAME "scanpin"
 
 #define SLURP_CHUNK 256
 #define PIDS_CHUNK  16
 
-#define LASTCPU_NUMFIELD 37
-
-#define PID_MAXLEN 5
-#define TID_MAXLEN 5
-
-#define TASKS_PATH_PATTERN  "/proc/%d/task/"
-#define TASKS_PATH_MAXLEN   (12 + PID_MAXLEN)
-
-#define STAT_PATH_PATTERN   "/proc/%d/task/%s/stat"
-#define STAT_PATH_MAXLEN    (17 + PID_MAXLEN + TID_MAXLEN)
-
-#define CHLD_PATH_PATTERN   "/proc/%d/task/%s/children"
-#define CHLD_PATH_MAXLEN    (21 + PID_MAXLEN + TID_MAXLEN)
-
 
 const char *progname;
 
-char    children = 0;
+size_t  children = 0;
+size_t  default_children = 10;
+
 pid_t  *pids_to_scan = NULL;
 size_t  pids_capacity = 0;
 size_t  pids_length = 0;
@@ -73,11 +65,14 @@ static void usage(void)
 	printf("Options:\n"
 	       "  -h, --help             Print this help message and exit\n"
 	       "  -V, --version          Print the version message and exit\n"
-	       "  -p, --period [ms]      Collect information every specified "
-	       "amount of\n"
-	       "                         millisecond [default = %lu]\n"
-	       "  -c, --children         Collect information for children (and descendants) too\n",
-	       scan_every_ms);
+	       "  -p, --period=<ms>      Collect information every <ms> "
+	       "millisecond\n"
+	       "                         [default = %lu]\n"
+	       "  -c, --children[=<n>]   Collect information for children "
+	       "too. Only scan for\n"
+	       "                         children once every <n> period "
+	       "[default = %lu]\n",
+	       scan_every_ms, default_children);
 }
 
 static void version(void)
@@ -160,168 +155,49 @@ static void untrack_pid(pid_t pid)
 }
 
 
-static char *slurp(FILE *stream)
+
+static int print_core_stat_handler(pid_t pid, tid_t tid,
+				   const struct task_stat *stat,
+				   void *data)
 {
-	size_t capacity = SLURP_CHUNK;
-	char *buffer = malloc(capacity + 1);
-	size_t length = 0;
-
-	while (!feof(stream)) {
-		if (length == capacity) {
-			capacity += SLURP_CHUNK;
-			buffer = realloc(buffer, capacity + 1);
-			if (buffer == NULL)
-				error("memory allocation failed for %lu",
-				      capacity);
-			buffer[capacity] = '\0';
-		}
-
-		length += fread(buffer + length, 1, capacity - length, stream);
-	}
-
-	buffer[length] = '\0';
-
-	return buffer;
+	printf("%lu:%d:%d:%u\n", *((size_t *) data), pid, tid, stat->core);
+	return 0;
 }
 
-static void erase_program_name(char *content)
+static int print_tid_handler(pid_t pid, tid_t tid, void *data)
 {
-	char *open_bracket = NULL;
-	char *close_bracket = NULL;
-	char *ptr;
-
-	for (ptr = content; *ptr != '\0'; ptr++) {
-		if (*ptr == '(' && open_bracket == NULL)
-			open_bracket = ptr;
-		if (*ptr == ')')
-			close_bracket = ptr;
-	}
-
-	if (open_bracket == NULL || close_bracket <= open_bracket)
-		error("invalid stat format: '%s'", content);
-
-	while (open_bracket <= close_bracket) {
-		*open_bracket = ' ';
-		open_bracket++;
-	}
-}
-
-static size_t get_field(const char *content, size_t field)
-{
-	const char *ptr = content;
-	size_t cur = 0;
+	int ret = for_tid_stat(pid, tid, print_core_stat_handler, data);
 	
-	while (*ptr != '\0') {
-		while (*ptr == ' ')
-			ptr++;
-		if (cur == field)
+	if (ret != 0)
+		warning("cannot scan %d:%d", pid, tid);
+	return 0;
+}
+
+
+static int track_stat_handler(pid_t pid,
+			      const struct task_stat *stat,
+			      void *data __attribute__((unused)))
+{
+	size_t i;
+
+	for (i=0; i < pids_length; i++) {
+		if (pid == pids_to_scan[i])
+			return 0;
+		if (stat->ppid == pids_to_scan[i]) {
+			track_pid(pid);
 			break;
-		
-		cur++;
-		while (*ptr != ' ')
-			ptr++;
+		}
 	}
 
-	return ptr - content;
+	return 0;
 }
 
-static void collect_task(pid_t pid, const char *tid)
+static int track_pid_handler(pid_t pid, void *data)
 {
-	char buffer[STAT_PATH_MAXLEN + 1];
-	char *content, *ptr, *err;
-	size_t core;
-	FILE *stat;
-
-	snprintf(buffer, sizeof (buffer), STAT_PATH_PATTERN, pid, tid);
-	stat = fopen(buffer, "r");
-	if (stat == NULL) {
-		warning("cannot open '%s'", buffer);
-		return;
-	}
-
-	content = slurp(stat);
-	erase_program_name(content);  /* the program name is hard to parse */
-
-	ptr = content + get_field(content, LASTCPU_NUMFIELD);
-	core = strtol(ptr, &err, 10);
-	if (*err != ' ' && *err != '\n')
-		error("invalid stat format '%s'", content);
-	printf("%lu:%d:%s:%lu\n", current_time, pid, tid, core);
-
-	free(content);
-	fclose(stat);
+	for_pid_stat(pid, track_stat_handler, data);
+	return 0;
 }
 
-static pid_t next_child(const char *content, size_t *from)
-{
-	const char *ptr = content + *from;
-	pid_t pid = 0;
-	char *err;
-
-	while (*ptr == ' ')
-		ptr++;
-	if (*ptr == '\0')
-		goto out;
-
-	pid = strtol(ptr, &err, 10);
-	if (*err != ' ' && *err != '\0')
-		error("invalid children format '%s'", *content);
-
- out:
-	*from = err - content;
-	return pid;
-}
-
-static void collect_children(pid_t pid, const char *tid)
-{
-	char buffer[CHLD_PATH_MAXLEN + 1];
-	FILE *children;
-	char *content;
-	size_t index;
-	pid_t child;
-
-	snprintf(buffer, sizeof (buffer), CHLD_PATH_PATTERN, pid, tid);
-	children = fopen(buffer, "r");
-	if (children == NULL) {
-		warning("cannot open '%s'", buffer);
-		return;
-	}
-
-	content = slurp(children);
-
-	index = 0;
-	while ((child = next_child(content, &index)) != 0)
-		track_pid(child);
-
-	free(content);
-	fclose(children);
-}
-
-static void collect_process(pid_t pid)
-{
-	char buffer[TASKS_PATH_MAXLEN + 1];
-	struct dirent *entry;
-	DIR *tasks;
-
-	snprintf(buffer, sizeof (buffer), TASKS_PATH_PATTERN, pid);
-	tasks = opendir(buffer);
-	if (tasks == NULL) {
-		untrack_pid(pid);
-		if (pids_length == 0)
-			clean_exit();
-		return;
-	}
-
-	while ((entry = readdir(tasks)) != NULL) {
-		if (entry->d_name[0] == '.')
-			continue;
-		collect_task(pid, entry->d_name);
-		if (children)
-			collect_children(pid, entry->d_name);
-	}
-
-	closedir(tasks);
-}
 
 
 static size_t now_millis(void)
@@ -354,7 +230,7 @@ static void parse_options(int *_argc, char ***_argv)
 		{"help",      no_argument,       0, 'h'},
 		{"version",   no_argument,       0, 'V'},
 		{"period",    required_argument, 0, 'p'},
-		{"chilren",   required_argument, 0, 'c'},
+		{"children",  optional_argument, 0, 'c'},
 		{ NULL,       0,                 0,  0}
 	};
 
@@ -380,7 +256,15 @@ static void parse_options(int *_argc, char ***_argv)
 				error("invalid period: '%s'", optarg);
 			break;
 		case 'c':
-			children = 1;
+			if (optarg == NULL) {
+				children = default_children;
+			} else {
+				children = strtol(optarg, &err, 10);
+				if (*err != '\0')
+					error("invalid children: '%s'",optarg);
+				if (children == 0)
+					error("invalid children: '%s'",optarg);
+			}
 			break;
 		default:
 			error("unknown option '%s'", argv[optind-1]);
@@ -411,7 +295,8 @@ static void parse_arguments(int argc, char **argv)
 int main(int argc, char **argv)
 {
 	size_t start, current, next;
-	size_t i, len;
+	size_t i, step;
+	int ret;
 	
 	progname = argv[0];
 	parse_options(&argc, &argv);
@@ -423,7 +308,8 @@ int main(int argc, char **argv)
 	start = now_millis();
 	current = start;
 	next = start;
-	
+
+	step = 0;
 	while (1) {
 		while (next <= current)
 			next += scan_every_ms;
@@ -432,9 +318,20 @@ int main(int argc, char **argv)
 		current = now_millis();
 		current_time = current - start;
 
-		len = pids_length;
-		for (i=0; i < len; i++)
-			collect_process(pids_to_scan[i]);
+		for (i=0; i < pids_length; i++) {
+			ret = foreach_tid(pids_to_scan[i], print_tid_handler,
+					  &current_time);
+			if (ret != 0)
+				untrack_pid(pids_to_scan[i]);
+
+			if (pids_length == 0)
+				clean_exit();
+		}
+
+		if (++step >= children)
+			step = 0;
+		if (step == 0)
+			foreach_pid(track_pid_handler, NULL);
 	}
 
 	/* dead code */

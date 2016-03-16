@@ -33,6 +33,7 @@ LDFLAGS := -ldl -lpthread
 
 pin-obj     := argument error runtime
 pin-lib     := -ldl -lpthread
+scanpin-obj := procfs scanpin
 scanpin-lib := -lrt
 pthread-lib := -lpthread -lrt
 
@@ -60,9 +61,9 @@ $(LIB)pin.so: $(patsubst %, $(OBJ)%.so, $(pin-obj)) | $(LIB)
 	$(call print,  LD      $@)
 	$(Q)$(CC) $(SOFLAGS) $^ -o $@ $(pin-lib)
 
-$(BIN)scanpin: $(SRC)scanpin.c | $(BIN)
-	$(call print,  CCLD    $@)
-	$(Q)$(CC) $(CCFLAGS) -DPROGNAME='"scanpin"' $< -o $@ $(scanpin-lib)
+$(BIN)scanpin: $(patsubst %, $(OBJ)%.o, $(scanpin-obj)) | $(BIN)
+	$(call print,  LD      $@)
+	$(Q)$(CC) $^ -o $@ $(scanpin-lib)
 
 $(BIN)%: $(TST)%.c | $(BIN)
 	$(call print,  CCLD    $@)
@@ -72,6 +73,10 @@ $(BIN)%: $(TST)%.c | $(BIN)
 $(OBJ)%.so: $(SRC)%.c | $(OBJ)
 	$(call print,  CC      $@)
 	$(Q)$(CC) -c $(CCFLAGS) -I$(INC) $(SOFLAGS) $< -o $@
+
+$(OBJ)%.o: $(SRC)%.c | $(OBJ)
+	$(call print,  CC      $@)
+	$(Q)$(CC) -c $(CCFLAGS) -I$(INC) $< -o $@
 
 
 $(OBJ) $(LIB) $(BIN):
