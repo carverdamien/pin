@@ -25,22 +25,33 @@
 #include <sched.h>
 
 
-void warning(const char *format, ...);
-
-void error(const char *format, ...);
-
-void errorp(const char *format, ...);
+#define __hidden  __attribute__((visibility("hidden")))
 
 
-void acquire_arguments(void);
+void  warning(const char *format, ...)
+	__hidden;
 
-const cpu_set_t *get_next_cpumask(void);
+void error(const char *format, ...)
+	__hidden;
 
-void map_cpuset_forward(cpu_set_t *dest, const cpu_set_t *src, size_t len);
+void errorp(const char *format, ...)
+	__hidden;
 
-void map_cpuset_reverse(cpu_set_t *dest, const cpu_set_t *src, size_t len);
 
-int map_cpu_reverse(int cpu);
+void acquire_arguments(void)
+	__hidden;
+
+const cpu_set_t *get_next_cpumask(void)
+	__hidden;
+
+void map_cpuset_forward(cpu_set_t *dest, const cpu_set_t *src, size_t len)
+	__hidden;
+
+void map_cpuset_reverse(cpu_set_t *dest, const cpu_set_t *src, size_t len)
+	__hidden;
+
+int map_cpu_reverse(int cpu)
+	__hidden;
 
 
 #endif
